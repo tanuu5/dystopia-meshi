@@ -362,7 +362,8 @@ export class Screens {
           </ul>
           <h4>操作</h4>
           <ul>
-            <li><span class="kbd">Tab</span> レシピDB　<span class="kbd">Enter</span> 次へ／提供　<span class="kbd">Z</span> 取り消し　<span class="kbd">A</span>/<span class="kbd">D</span> 冷却／加熱（長押し）　<span class="kbd">Esc</span> 一時停止　<span class="kbd">M</span> 消音</li>
+            <li class="keys"><span class="kbd">Tab</span> レシピDB　<span class="kbd">Enter</span> 次へ／提供　<span class="kbd">Z</span> 取り消し　<span class="kbd">A</span>/<span class="kbd">D</span> 冷却／加熱（長押し）　<span class="kbd">Esc</span> 一時停止　<span class="kbd">M</span> 消音</li>
+            <li>市民照会・指示書・要求ログは、見出しを押すと小さく畳めます（スマホでは市民照会と指示書が最初から畳まれています）。畳んだ指示書にも、料理名と進み具合（緑＝合っている、赤＝違う）が出ます。</li>
           </ul>
           <div class="actions"><button class="btn primary close">閉じる</button></div>
         </div>

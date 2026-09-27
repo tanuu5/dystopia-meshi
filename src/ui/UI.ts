@@ -58,6 +58,20 @@ function stepIndex(s: Step): number {
   return STEPS.findIndex((x) => x.id === s);
 }
 
+/** 見出しをタップして畳めるパネル */
+type FoldKey = 'citizen' | 'order' | 'dialog';
+/** スマホ・縦向きのタブレットなど（パネルを小さくまとめる）。style.css の同じ条件と合わせる */
+const COMPACT_QUERY = '(max-width: 600px), (max-height: 520px), (orientation: portrait) and (max-width: 900px)';
+
+/** 3D が見えている領域（CSS px） */
+export interface FocusRect {
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+}
+const CHEV = '<span class="chev" aria-hidden="true"></span>';
+
 export class UI {
   readonly root: HTMLElement;
   readonly db: RecipeDB;
@@ -90,6 +104,12 @@ export class UI {
   step: Step = 'ing';
   private lastOrderCtx: OrderCardCtx | null = null;
   private discardArmed = false;
+  /** 畳んだパネル。スマホでは市民照会と指示書を最初から畳む（見出しのタップで開閉） */
+  private fold: Record<FoldKey, boolean> = { citizen: false, order: false, dialog: false };
+  private foldTouched: Record<FoldKey, boolean> = { citizen: false, order: false, dialog: false };
+  private compactMQ = window.matchMedia(COMPACT_QUERY);
+  private focus: FocusRect | null = null;
+  private focusT = 0;
 
   constructor(root: HTMLElement, handlers: UIHandlers) {
     this.root = root;
@@ -106,6 +126,69 @@ export class UI {
     this.db.onPin = (id) => this.h.onPin(id);
     this.db.onToggle = (open) => this.h.onDBToggle(open);
     this.bindTankHover();
+    this.bindFold(this.citizenEl, 'citizen');
+    this.bindFold(this.orderEl, 'order');
+    this.bindFold(this.dialogEl, 'dialog');
+    this.applyFoldDefaults();
+    this.compactMQ.addEventListener('change', () => this.applyFoldDefaults());
+  }
+
+  /** スマホなど狭い画面か */
+  get compact(): boolean {
+    return this.compactMQ.matches;
+  }
+
+  private applyFoldDefaults(): void {
+    const c = this.compact;
+    if (!this.foldTouched.citizen) this.fold.citizen = c;
+    if (!this.foldTouched.order) this.fold.order = c;
+    this.applyFold();
+  }
+
+  private applyFold(): void {
+    this.citizenEl.classList.toggle('folded', this.fold.citizen);
+    this.orderEl.classList.toggle('folded', this.fold.order);
+    this.dialogEl.classList.toggle('folded', this.fold.dialog);
+  }
+
+  /** 見出しのタップで開閉（中身は作り直されても、パネル本体で受ける） */
+  private bindFold(el: HTMLElement, key: FoldKey): void {
+    el.addEventListener('click', (e) => {
+      const head = (e.target as HTMLElement).closest('.panel-head');
+      if (!head || !el.contains(head)) return;
+      this.fold[key] = !this.fold[key];
+      this.foldTouched[key] = true;
+      this.applyFold();
+      if (key === 'dialog' && !this.fold.dialog) this.scrollLog();
+    });
+  }
+
+  /**
+   * スマホなどで、まわりのパネルに囲まれて 3D が見えている領域（CSS px）。
+   * カメラはこの領域の中央に注目点が来るようにずらす。広い画面では null（画面の中央のまま）
+   */
+  focusRect(): FocusRect | null {
+    return this.focus;
+  }
+
+  private measureFocus(): FocusRect | null {
+    if (!this.compact) return null;
+    const W = window.innerWidth;
+    const H = window.innerHeight;
+    const f: FocusRect = { left: 0, right: W, top: this.hud.classList.contains('hidden') ? 0 : this.hud.getBoundingClientRect().bottom, bottom: H };
+    const els = [this.citizenEl, this.orderEl, this.dialogEl, this.consoleEl, this.root.querySelector<HTMLElement>('.rating'), this.db.isOpen ? this.db.el : null];
+    for (const el of els) {
+      if (!el || el.classList.contains('off')) continue;
+      // 開いた市民照会・指示書は一時的に重ねて読むものなので数えない（開くたびに画面が動かないように）
+      if ((el === this.citizenEl || el === this.orderEl) && !el.classList.contains('folded')) continue;
+      const r = el.getBoundingClientRect();
+      if (r.height <= 0 || r.width <= 0) continue;
+      // 横向きの右側に縦長に置かれたもの（操作盤・評価・レシピDB）は右端を狭める。それ以外は上下を狭める
+      if (r.left > W * 0.4 && r.height > H * 0.5) f.right = Math.min(f.right, r.left);
+      else if (r.top + r.height / 2 < H / 2) f.top = Math.max(f.top, r.bottom);
+      else f.bottom = Math.min(f.bottom, r.top);
+    }
+    return f.bottom - f.top > 80 && f.right - f.left > 120 ? f : null;
   }
 
   private div(cls: string, html = ''): HTMLElement {
@@ -182,7 +265,7 @@ export class UI {
     }
     const allergyText = allergy ? MODIFIERS[allergy].card : null;
     this.citizenEl.innerHTML = `
-      <div class="panel-head"><span>CITIZEN ID</span><span class="spacer"></span><span class="jp">市民照会</span></div>
+      <div class="panel-head" title="タップで開閉"><span>CITIZEN ID</span><span class="spacer"></span><span class="jp">市民照会</span>${CHEV}</div>
       <div class="idcard">
         <div class="avatar"><canvas width="108" height="128"></canvas></div>
         <div>
@@ -213,7 +296,7 @@ export class UI {
   private buildDialog(): void {
     this.dialogEl = this.div(
       'panel dialog off',
-      `<div class="panel-head"><span>DIALOGUE</span><span class="spacer"></span><span class="jp">要求ログ</span></div>
+      `<div class="panel-head" title="タップで開閉"><span>DIALOGUE</span><span class="spacer"></span><span class="jp">要求ログ</span>${CHEV}</div>
        <div class="dlg-log"></div>
        <div class="dlg-q"><div class="qhead"><span>質問（市民の忍耐を消費）</span><span>残り <b class="ql">0</b></span></div><div class="qbtns"></div></div>`,
     );
@@ -337,53 +420,66 @@ export class UI {
     const b = ctx.build;
     const si = stepIndex(ctx.step);
     let body = '';
+    // 畳んだときの 1 行（料理名と、配合・工程の進み具合を小さなチップで）
+    let mini = `<span class="mn none">未設定</span><span class="mhint">キーワードかレシピDBから</span>`;
     if (!ctx.recipe || !ctx.target) {
       body = `<div class="oc-empty">指示書は未設定です。<br/>会話の<b style="color:var(--cyan)">光るキーワード</b>や<br/>レシピDB からレシピを選んで固定してください。</div>`;
     } else {
       const t = ctx.target;
       const rows: string[] = [];
+      const chips: string[] = [];
       const ids = new Set<IngId>([...(Object.keys(t.ing) as IngId[]), ...(Object.keys(b.ing) as IngId[]).filter((id) => b.ing[id] > 0)]);
       for (const id of INGREDIENTS.map((i) => i.id)) {
         if (!ids.has(id)) continue;
         const need = t.ing[id] ?? 0;
         const have = b.ing[id] ?? 0;
         const cls = need === 0 ? 'extra' : have === need ? 'ok' : have > need ? 'ng' : '';
+        const count = need === 0 ? `+${have}` : `${have}/${need}`;
         rows.push(
-          `<li class="${cls}"><span class="k">素材</span><span><i class="swatch" style="background:${ING[id].color}"></i>${ING[id].name}${need ? ` ×${need}` : ''}</span><span class="st">${need === 0 ? `+${have}` : `${have}/${need}`}</span></li>`,
+          `<li class="${cls}"><span class="k">素材</span><span><i class="swatch" style="background:${ING[id].color}"></i>${ING[id].name}${need ? ` ×${need}` : ''}</span><span class="st">${count}</span></li>`,
         );
+        chips.push(`<span class="mc ${cls === 'extra' ? 'ng' : cls}" title="${esc(ING[id].name)}"><i class="swatch" style="background:${ING[id].color}"></i>${count}</span>`);
       }
       const formDone = si > 0 && b.form;
-      rows.push(
-        `<li class="${formDone ? (b.form === t.form ? 'ok' : 'ng') : ''}"><span class="k">成形</span><span>${FORM[t.form].name}</span><span class="st">${formDone ? (b.form === t.form ? '✓' : FORM[b.form!].name) : '—'}</span></li>`,
-      );
+      const formCls = formDone ? (b.form === t.form ? 'ok' : 'ng') : '';
+      rows.push(`<li class="${formCls}"><span class="k">成形</span><span>${FORM[t.form].name}</span><span class="st">${formDone ? (b.form === t.form ? '✓' : FORM[b.form!].name) : '—'}</span></li>`);
+      chips.push(`<span class="mc ${formCls}">${FORM[t.form].name}</span>`);
       const curHeat = b.temp > BURN_AT ? null : heatFromTemp(b.temp);
       const heatTouched = si >= 2;
+      const heatCls = heatTouched ? (b.temp > BURN_AT ? 'ng' : curHeat === t.heat ? 'ok' : '') : '';
       rows.push(
-        `<li class="${heatTouched ? (b.temp > BURN_AT ? 'ng' : curHeat === t.heat ? 'ok' : '') : ''}"><span class="k">温度</span><span>${HEAT[t.heat].name}</span><span class="st">${heatTouched ? (b.temp > BURN_AT ? '焦げ' : curHeat === t.heat ? '✓' : HEAT[curHeat!].name) : '—'}</span></li>`,
+        `<li class="${heatCls}"><span class="k">温度</span><span>${HEAT[t.heat].name}</span><span class="st">${heatTouched ? (b.temp > BURN_AT ? '焦げ' : curHeat === t.heat ? '✓' : HEAT[curHeat!].name) : '—'}</span></li>`,
       );
+      chips.push(`<span class="mc ${heatCls}">${HEAT[t.heat].name}</span>`);
       const topDone = si > 3;
+      const topCls = topDone ? (b.topping === t.topping ? 'ok' : 'ng') : '';
       rows.push(
-        `<li class="${topDone ? (b.topping === t.topping ? 'ok' : 'ng') : ''}"><span class="k">仕上げ</span><span>${t.topping ? `<i class="swatch" style="background:${ING[t.topping].color}"></i>${ING[t.topping].name}` : 'なし'}</span><span class="st">${topDone ? (b.topping === t.topping ? '✓' : b.topping ? ING[b.topping].name.slice(0, 3) : 'なし') : '—'}</span></li>`,
+        `<li class="${topCls}"><span class="k">仕上げ</span><span>${t.topping ? `<i class="swatch" style="background:${ING[t.topping].color}"></i>${ING[t.topping].name}` : 'なし'}</span><span class="st">${topDone ? (b.topping === t.topping ? '✓' : b.topping ? ING[b.topping].name.slice(0, 3) : 'なし') : '—'}</span></li>`,
       );
+      chips.push(`<span class="mc ${topCls}">${t.topping ? `<i class="swatch" style="background:${ING[t.topping].color}"></i>仕上` : '仕上なし'}</span>`);
       const vDone = si > 4 && b.vessel;
-      rows.push(
-        `<li class="${vDone ? (b.vessel === t.vessel ? 'ok' : 'ng') : ''}"><span class="k">器</span><span>${VESSEL[t.vessel].name}</span><span class="st">${vDone ? (b.vessel === t.vessel ? '✓' : VESSEL[b.vessel!].name) : '—'}</span></li>`,
-      );
+      const vCls = vDone ? (b.vessel === t.vessel ? 'ok' : 'ng') : '';
+      rows.push(`<li class="${vCls}"><span class="k">器</span><span>${VESSEL[t.vessel].name}</span><span class="st">${vDone ? (b.vessel === t.vessel ? '✓' : VESSEL[b.vessel!].name) : '—'}</span></li>`);
+      chips.push(`<span class="mc ${vCls}">${VESSEL[t.vessel].name}</span>`);
       body = `<div class="oc-name">${esc(ctx.recipe.name)}${ctx.substituted ? '<span class="badge sub">代替配合</span>' : ''}</div>
         <ul class="checklist">${rows.join('')}</ul>
         ${ctx.substituted ? '<div class="oc-sub">欠品素材を代替配合に置き換えています。</div>' : ''}`;
+      mini = `<span class="mn">${esc(ctx.recipe.name)}${ctx.substituted ? '<span class="badge sub">代替</span>' : ''}</span><span class="mchips">${chips.join('')}</span>`;
     }
+    const memoCount = ctx.memo.length ? `<span class="mc memo-n">要望 ${ctx.memo.length}</span>` : '';
     const memo = `<div class="memo">
         <div class="mh"><span>要望メモ（目標に反映）</span><button class="memo-add">＋ 追加</button></div>
         <div class="memo-list">${ctx.memo.length ? ctx.memo.map((m) => `<span class="memo-item" title="${esc(MODIFIERS[m].howto)}">${esc(MODIFIERS[m].label)}：${esc(MODIFIERS[m].howto)}<button data-rm="${m}">✕</button></span>`).join('') : '<span style="color:var(--faint);font-size:0.85em">なし</span>'}</div>
         ${this.memoOpen ? `<div class="memo-pick">${MEMO_CHOICES.filter((m) => !ctx.memo.includes(m)).map((m) => `<button data-add="${m}">${esc(MODIFIERS[m].label)}</button>`).join('')}</div>` : ''}
       </div>`;
     this.orderEl.innerHTML = `
-      <div class="panel-head"><span>ORDER SHEET</span><span class="spacer"></span><span class="jp">指示書</span></div>
+      <div class="panel-head" title="タップで開閉"><span>ORDER SHEET</span><span class="spacer"></span><span class="jp">指示書</span>${CHEV}</div>
+      <div class="oc-mini">${mini}${memoCount}<button class="btn mini-db" title="レシピDB">${ICON.book}</button></div>
       <div class="oc-body">${body}${memo}
         <div class="oc-actions"><button class="btn db-open">${ICON.book} レシピDB <span class="kbd">Tab</span></button></div>
       </div>`;
     this.orderEl.querySelector('.db-open')!.addEventListener('click', () => this.db.toggle());
+    this.orderEl.querySelector('.mini-db')!.addEventListener('click', () => this.db.toggle());
     this.orderEl.querySelector('.memo-add')!.addEventListener('click', () => {
       this.memoOpen = !this.memoOpen;
       this.renderOrderCard(ctx);
@@ -436,7 +532,7 @@ export class UI {
     const units = Object.values(build.ing).reduce((a, b) => a + b, 0);
     switch (step) {
       case 'ing': {
-        main.innerHTML = `<div class="c-hint"><span>素材を投入 <b>${units}/${MAX_UNITS}</b>　（タンクを直接クリックしてもOK）</span><span>取り消し <span class="kbd">Z</span></span></div>
+        main.innerHTML = `<div class="c-hint"><span>素材を投入 <b>${units}/${MAX_UNITS}</b>　（タンクを直接押してもOK）</span><span class="keys">取り消し <span class="kbd">Z</span></span></div>
           <div class="grid-ing">${INGREDIENTS.map((i) => {
             const n = build.ing[i.id];
             const short = shortages.includes(i.id);
@@ -650,14 +746,23 @@ export class UI {
       const hgt = el.offsetHeight;
       let x = window.innerWidth / 2 - w / 2;
       let y = window.innerHeight / 2 - hgt / 2;
-      if (r) {
-        if (place === 'top') {
+      // スマホでは横に置く余地がないので、対象の上か下へ。画面いっぱいの対象（レシピDB）なら画面の下端へ
+      let pl = place;
+      let dockBottom = false;
+      if (r && this.compact && (pl === 'left' || pl === 'right')) {
+        if (r.height > window.innerHeight * 0.6) dockBottom = true;
+        else pl = r.top + r.height / 2 > window.innerHeight / 2 ? 'top' : 'bottom';
+      }
+      if (dockBottom) {
+        y = window.innerHeight - hgt - 8;
+      } else if (r) {
+        if (pl === 'top') {
           x = r.left + r.width / 2 - w / 2;
           y = r.top - hgt - 14;
-        } else if (place === 'bottom') {
+        } else if (pl === 'bottom') {
           x = r.left + r.width / 2 - w / 2;
           y = r.bottom + 14;
-        } else if (place === 'left') {
+        } else if (pl === 'left') {
           x = r.left - w - 14;
           y = r.top + r.height / 2 - hgt / 2;
         } else {
@@ -682,6 +787,12 @@ export class UI {
   // ───────────── 毎フレーム ─────────────
 
   update(dt: number): void {
+    // 3D が見えている領域を測り直す（パネルの出し入れはたまにしか起きないので間引く）
+    this.focusT -= dt;
+    if (this.focusT <= 0) {
+      this.focusT = 0.2;
+      this.focus = this.measureFocus();
+    }
     // ニュースティッカー
     if (!this.hud.classList.contains('hidden')) {
       this.tickerX -= dt * 55;

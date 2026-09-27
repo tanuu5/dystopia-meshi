@@ -2171,6 +2171,143 @@ h3,
   padding: 20px;
 }
 
+/* ───────── 畳めるパネル（見出しのタップで開閉） ───────── */
+.citizen .panel-head,
+.ordercard .panel-head,
+.dialog .panel-head {
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.panel-head .chev {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  margin: 0 2px 3px 4px;
+  border-right: 1.5px solid var(--cyan);
+  border-bottom: 1.5px solid var(--cyan);
+  transform: rotate(45deg);
+  opacity: 0.8;
+  transition: transform 0.2s;
+}
+.panel.folded .panel-head .chev {
+  transform: rotate(-45deg);
+  margin-bottom: 0;
+}
+/* 市民照会：名前と忍耐だけ（アレルギーは畳んでも見せる） */
+.citizen.folded .idcard {
+  grid-template-columns: 26px 1fr;
+  gap: 8px;
+  padding: 6px 10px 4px;
+  align-items: center;
+}
+.citizen.folded .idcard .avatar {
+  width: 26px;
+  height: 31px;
+}
+.citizen.folded .idcard .num,
+.citizen.folded .idcard .job,
+.citizen.folded .idcard .note {
+  display: none;
+}
+.citizen.folded .idcard .name {
+  font-size: 1em;
+}
+.citizen.folded .idcard .allergy {
+  padding: 2px 6px;
+  font-size: 0.82em;
+}
+.citizen.folded .patience {
+  padding: 0 10px 7px;
+}
+.citizen.folded .patience .row {
+  margin-bottom: 2px;
+}
+/* 指示書：料理名と、配合・工程の進み具合のチップだけ */
+.oc-mini {
+  display: none;
+}
+.ordercard.folded .oc-body {
+  display: none;
+}
+.ordercard.folded .oc-mini {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px 6px;
+  padding: 6px 8px 8px 10px;
+}
+.oc-mini .mn {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--display);
+  font-weight: 400;
+  font-synthesis: none;
+  font-size: 1.05em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.oc-mini .mn.none {
+  flex: none;
+  font-family: var(--font);
+  color: var(--muted);
+  font-size: 0.9em;
+}
+.oc-mini .mhint {
+  flex: 1;
+  font-size: 0.75em;
+  color: var(--faint);
+}
+.oc-mini .mchips {
+  order: 3;
+  width: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+.oc-mini .mc {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 5px;
+  border-radius: 3px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--muted);
+  font-size: 0.76em;
+  white-space: nowrap;
+}
+.oc-mini .mc .swatch {
+  margin-right: 3px;
+}
+.oc-mini .mc.ok {
+  color: var(--green);
+  border-color: rgba(109, 255, 176, 0.45);
+}
+.oc-mini .mc.ng {
+  color: var(--red);
+  border-color: rgba(255, 77, 94, 0.5);
+}
+.oc-mini .mc.memo-n {
+  order: 2;
+  color: var(--amber);
+}
+.oc-mini .mini-db {
+  order: 2;
+  flex: none;
+  padding: 3px 8px;
+}
+.oc-mini .mini-db svg {
+  width: 14px;
+  height: 14px;
+}
+/* 会話：最新の 2 行だけ */
+.dialog.folded .dlg-log .line:not(:nth-last-child(-n + 2)) {
+  display: none;
+}
+.dialog.folded .dlg-q {
+  display: none;
+}
+
 /* ───────── 狭い画面 ───────── */
 @media (max-width: 1100px) {
   :root {
@@ -2259,6 +2396,249 @@ h3,
   .end-stats,
   .report .sum {
     grid-template-columns: repeat(2, 1fr);
+  }
+}
+/* スマホ・縦向きのタブレット：3D が見えるよう、パネルを小さくして上下の端へ寄せる（UI.ts の COMPACT_QUERY と同じ条件） */
+@media (max-width: 600px), (max-height: 520px), (orientation: portrait) and (max-width: 900px) {
+  button {
+    touch-action: manipulation;
+    -webkit-touch-callout: none;
+  }
+  .panel-head {
+    padding: 5px 10px;
+    font-size: 0.78em;
+  }
+  .citizen,
+  .ordercard {
+    top: 50px;
+    width: calc(50vw - 9px);
+  }
+  .dialog {
+    max-height: 24vh;
+  }
+  .dlg-log {
+    padding: 6px 10px 4px;
+    gap: 5px;
+  }
+  .line {
+    line-height: 1.5;
+  }
+  .dlg-q {
+    padding: 5px 8px 7px;
+  }
+  .dlg-q .qhead {
+    margin-bottom: 3px;
+    font-size: 0.72em;
+  }
+  .qbtns {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .qbtn {
+    flex: none;
+    padding: 3px 8px;
+  }
+  /* 操作盤がないとき（注文を聞いている間など）は、会話を画面の下端へ */
+  #ui:has(.console.off) .dialog {
+    bottom: 6px;
+  }
+  .steps .s {
+    padding: 5px 2px;
+    font-size: 0.78em;
+  }
+  .c-body {
+    padding: 7px 8px 8px;
+    gap: 7px;
+    min-height: 0;
+  }
+  .c-hint {
+    margin-bottom: 4px;
+  }
+  .grid-ing {
+    grid-template-columns: repeat(4, 1fr);
+    gap: 4px;
+  }
+  .ing-btn {
+    grid-template-columns: 10px 1fr;
+    gap: 4px;
+    padding: 6px 4px;
+  }
+  .ing-btn .dot {
+    width: 10px;
+    height: 10px;
+  }
+  .ing-btn .cd {
+    display: none;
+  }
+  .ing-btn .cnt {
+    right: -4px;
+    top: -8px;
+    min-width: 15px;
+    height: 15px;
+    padding: 0 3px;
+    font-size: 0.72em;
+  }
+  /* 形・仕上げ・器は 2 行・2 行・1 行に収める */
+  .grid-5 {
+    grid-template-columns: repeat(5, 1fr);
+    gap: 4px;
+  }
+  .grid-6 {
+    grid-template-columns: repeat(6, 1fr);
+    gap: 4px;
+  }
+  .grid-7 {
+    grid-template-columns: repeat(7, 1fr);
+    gap: 3px;
+  }
+  .opt {
+    padding: 4px 2px 3px;
+    gap: 2px;
+    font-size: 0.8em;
+    min-width: 0;
+  }
+  .opt > span {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .opt svg {
+    width: 24px;
+    height: 19px;
+  }
+  .opt .dot,
+  .opt .none {
+    width: 14px;
+    height: 14px;
+  }
+  .heat-btn {
+    width: 84px;
+    height: 54px;
+  }
+  .gauge {
+    height: 54px;
+  }
+  /* 評価：カードは下へ、客の反応（会話）は上へ。あいだに客の表情が見える */
+  .rating {
+    top: auto;
+    bottom: 6px;
+    max-height: 66vh;
+    overflow-y: auto;
+  }
+  .rating .rb {
+    padding: 8px 12px 10px;
+  }
+  .rating .stars {
+    font-size: 1.6em;
+  }
+  .rating .bd {
+    grid-template-columns: 1fr 1fr;
+    column-gap: 10px;
+    margin: 6px 0;
+  }
+  .rating .ailog {
+    margin-top: 6px;
+    padding: 4px 8px;
+  }
+  #ui:has(.rating) .dialog {
+    top: 50px;
+    bottom: auto;
+    max-height: 22vh;
+  }
+  /* 評価中はもう質問できないので、質問欄をしまって客の反応を見せる */
+  #ui:has(.rating) .dlg-q {
+    display: none;
+  }
+  #ui:has(.rating) .citizen,
+  #ui:has(.rating) .ordercard {
+    opacity: 0;
+    pointer-events: none;
+  }
+  .title-box {
+    margin: 0 18px;
+  }
+  .title-desc {
+    font-size: 0.95em;
+    line-height: 1.8;
+  }
+  .modal .mb {
+    padding: 10px 14px 14px;
+  }
+  .setting {
+    grid-template-columns: 96px 1fr;
+  }
+}
+/* スマホの横向き：右に操作盤（評価も右）、左に市民照会・指示書・会話。3D は左側の空いたところに見せる */
+@media (max-height: 520px) and (orientation: landscape) {
+  :root {
+    --rcol: min(48vw, 430px);
+    --lcol: calc((100vw - var(--rcol) - 24px) / 2);
+  }
+  .console {
+    left: auto;
+    right: 6px;
+    top: 50px;
+    bottom: 6px;
+    width: var(--rcol);
+    transform: none;
+    display: flex;
+    flex-direction: column;
+  }
+  .console.off {
+    transform: translateX(20px);
+  }
+  .console .c-body {
+    flex: 1;
+    overflow-y: auto;
+    flex-direction: column;
+  }
+  .c-side {
+    width: 100%;
+    flex-direction: row;
+    justify-content: flex-start;
+  }
+  .c-side .btn {
+    flex: 1;
+  }
+  .citizen {
+    width: var(--lcol);
+  }
+  .ordercard {
+    right: auto;
+    left: calc(var(--lcol) + 12px);
+    width: var(--lcol);
+  }
+  .dialog,
+  #ui:has(.rating) .dialog {
+    top: auto;
+    left: 6px;
+    right: calc(var(--rcol) + 12px);
+    bottom: 6px;
+    max-height: 36vh;
+  }
+  .rating {
+    left: auto;
+    right: 6px;
+    top: 50px;
+    bottom: 6px;
+    width: var(--rcol);
+    max-height: none;
+  }
+  .grid-5 {
+    grid-template-columns: repeat(5, 1fr);
+  }
+  /* 縦に余裕があるので、素材ボタンは押しやすく大きめに */
+  .ing-btn {
+    padding: 9px 5px;
+  }
+}
+/* タッチ操作が主の端末では、キーボードの案内を出さない */
+@media (pointer: coarse) {
+  .kbd,
+  .keys {
+    display: none !important;
   }
 }
 @media (prefers-reduced-motion: reduce) {

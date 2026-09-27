@@ -1104,9 +1104,10 @@ export class Game {
   }
 
   private onDB(open: boolean): void {
-    // タイトル画面では、引き出しとタイトル文字のあいだに料理が見えるよう中央へ戻す
+    // タイトル画面では、引き出しとタイトル文字のあいだに料理が見えるよう中央へ戻す。
+    // スマホなどでは、引き出しを含めた見えている領域からカメラ側で合わせる
     if (this.phase === 'title') this.world.stage.setViewShift(open ? 0 : this.titleViewShift());
-    else this.world.stage.setViewShift(open ? Math.min(230, window.innerWidth * 0.18) : 0);
+    else if (!this.ui.compact) this.world.stage.setViewShift(open ? Math.min(230, window.innerWidth * 0.18) : 0);
     this.audio.whoosh();
   }
 
@@ -1166,6 +1167,8 @@ export class Game {
   // ───────────── 毎フレーム ─────────────
 
   update(dt: number): void {
+    // スマホなど：まわりのパネルに囲まれて 3D が見えている領域の中央へ、カメラの注目点を寄せる
+    this.world.stage.setFocusRect(this.ui.focusRect());
     // 画質の自動調整（最初の数秒の平均で判断）
     // 実時間で測る（dt は開発用の倍速がかかることがある）
     const nowMs = performance.now();

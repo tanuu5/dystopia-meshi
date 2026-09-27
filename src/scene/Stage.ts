@@ -6,6 +6,13 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { damp } from '../util/anim.ts';
 
+/**
+ * 縦長の画面では横の視野が狭くなりすぎるので、この縦横比の画面と同じ横幅が見えるよう画角を広げる。
+ * 広げすぎると歪むので PORTRAIT_MAX_FOV までにとどめ、足りない分はカメラを後ろへ引く
+ */
+const PORTRAIT_REF_ASPECT = 0.9;
+const PORTRAIT_MAX_FOV = 72;
+
 export type Quality = 'high' | 'mid' | 'low';
 
 export interface Shot {
@@ -101,6 +108,11 @@ export class Stage {
   private shake = 0;
   private viewShift = 0;
   private viewShiftGoal = 0;
+  /** 見えている領域の中央へ注目点を寄せるずらし（px）。正で絵が左・上へ動く */
+  private focusX = 0;
+  private focusXGoal = 0;
+  private viewShiftY = 0;
+  private viewShiftYGoal = 0;
   drift = 0;
 
   constructor(container: HTMLElement) {
@@ -218,11 +230,23 @@ export class Stage {
     this.viewShiftGoal = px;
   }
 
+  /**
+   * 3D が見えている領域（CSS px）。注目点がこの領域の中央に来るよう、絵を上下左右にずらす。
+   * null なら画面の中央（広い画面）
+   */
+  setFocusRect(r: { left: number; right: number; top: number; bottom: number } | null): void {
+    const w = this.container.clientWidth;
+    const h = this.container.clientHeight;
+    this.focusXGoal = r ? w / 2 - (r.left + r.right) / 2 : 0;
+    this.viewShiftYGoal = r ? h / 2 - (r.top + r.bottom) / 2 : 0;
+  }
+
   private applyViewShift(): void {
     const w = this.container.clientWidth;
     const h = this.container.clientHeight;
-    if (Math.abs(this.viewShift) < 0.5) this.camera.clearViewOffset();
-    else this.camera.setViewOffset(w, h, this.viewShift, 0, w, h);
+    const x = this.viewShift + this.focusX;
+    if (Math.abs(x) < 0.5 && Math.abs(this.viewShiftY) < 0.5) this.camera.clearViewOffset();
+    else this.camera.setViewOffset(w, h, x, this.viewShiftY, w, h);
   }
 
   update(dt: number, time: number): void {
@@ -233,7 +257,20 @@ export class Stage {
 
     this.parallax.lerp(this.mouse, damp(2.5, dt));
     const cam = this.camera;
+    // 縦長の画面：横の視野を保つよう画角を広げ、広げきれない分はカメラを引く
+    let fov = this.cur.fov;
+    let dolly = 1;
+    if (cam.aspect < PORTRAIT_REF_ASPECT) {
+      let tv = (Math.tan(THREE.MathUtils.degToRad(fov / 2)) * PORTRAIT_REF_ASPECT) / cam.aspect;
+      const tMax = Math.tan(THREE.MathUtils.degToRad(PORTRAIT_MAX_FOV / 2));
+      if (tv > tMax) {
+        dolly = tv / tMax;
+        tv = tMax;
+      }
+      fov = THREE.MathUtils.radToDeg(Math.atan(tv) * 2);
+    }
     cam.position.copy(this.cur.pos);
+    if (dolly !== 1) cam.position.sub(this.cur.target).multiplyScalar(dolly).add(this.cur.target);
     cam.position.x += this.parallax.x * 0.06 + Math.sin(time * 0.13) * 0.02 * (1 + this.drift * 6);
     cam.position.y += -this.parallax.y * 0.035 + Math.sin(time * 0.21) * 0.01 * (1 + this.drift * 3);
     const t = this.cur.target.clone();
@@ -245,13 +282,22 @@ export class Stage {
       this.shake = Math.max(0, this.shake - dt * 2.5);
     }
     cam.lookAt(t);
-    if (Math.abs(cam.fov - this.cur.fov) > 0.01) {
-      cam.fov = this.cur.fov;
+    if (Math.abs(cam.fov - fov) > 0.01) {
+      cam.fov = fov;
       cam.updateProjectionMatrix();
     }
-    const vs = this.viewShift + (this.viewShiftGoal - this.viewShift) * damp(6, dt);
-    if (Math.abs(vs - this.viewShift) > 0.05 || (this.viewShiftGoal === 0 && this.viewShift !== 0)) {
-      this.viewShift = Math.abs(vs - this.viewShiftGoal) < 0.3 ? this.viewShiftGoal : vs;
+    // ずらしは少しずつ（パネルの出し入れで絵が跳ねないように）
+    const ease = (cur: number, goal: number, rate: number) => {
+      const v = cur + (goal - cur) * damp(rate, dt);
+      return Math.abs(v - goal) < 0.3 ? goal : v;
+    };
+    const vs = ease(this.viewShift, this.viewShiftGoal, 6);
+    const fx = ease(this.focusX, this.focusXGoal, 4);
+    const vy = ease(this.viewShiftY, this.viewShiftYGoal, 4);
+    if (vs !== this.viewShift || fx !== this.focusX || vy !== this.viewShiftY) {
+      this.viewShift = vs;
+      this.focusX = fx;
+      this.viewShiftY = vy;
       this.applyViewShift();
     }
     this.final.uniforms.uTime.value = time;
