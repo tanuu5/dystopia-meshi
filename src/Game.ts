@@ -399,6 +399,9 @@ export class Game {
     this.step = 'ing';
     this.burntWarned = false;
     this.waitLineT = 30;
+    // レシピDB の絞り込みと「固定中」の印は、前の客のものを持ち越さない
+    this.ui.db.clearFilters();
+    this.ui.db.setContext(this.availableRecipes(), this.dayDef.shortages, null);
     this.ui.clearLog();
     this.ui.showCitizen(order.citizen, order.cardAllergy, this.settings.relaxed);
     this.ui.setPatience(1, this.settings.relaxed);

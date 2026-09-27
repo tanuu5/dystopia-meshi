@@ -117,11 +117,14 @@ export class RecipeDB {
     this.noteEl.innerHTML = on ? `<b>MEAL-7 学習モード</b>営業時間外のため、市民は待っていません。<br/>${esc(note)}` : '';
   }
 
+  /** 絞り込み（条件・検索語・素材の強調）と、開いていたカードを初期状態に戻す */
   clearFilters(): void {
     for (const k of Object.keys(this.filters) as FilterKey[]) this.filters[k].clear();
     this.q = '';
     this.input.value = '';
     this.hlIng = null;
+    this.expanded = null;
+    if (this.isOpen) this.render();
   }
 
   open(tab?: 'recipe' | 'ing'): void {
