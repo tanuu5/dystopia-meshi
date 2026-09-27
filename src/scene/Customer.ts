@@ -20,11 +20,30 @@ const POSES: Record<Pose, { r: ArmPose; l: ArmPose }> = {
 };
 
 interface Arm {
+  /** -1 = 右腕（本人の右、正面を向いたときの -X 側）、1 = 左腕 */
+  side: 1 | -1;
   shoulder: THREE.Group;
   elbow: THREE.Group;
   hand: THREE.Mesh;
-  cur: ArmPose;
+  /** いまの肩の回転と肘の曲がり */
+  q: THREE.Quaternion;
+  ex: number;
 }
+
+/** スプーンの付け根（手の中心）から皿（先端）までの長さ */
+const SPOON_REACH = 0.135;
+/** 右手で、スプーンの先を目標へ向けるときの手の置き方（手 → 先端の向き、体の向きの座標） */
+const BITE_DIR = new THREE.Vector3(0.3, 0.5, -0.81).normalize(); // 口：下の前から、内側へ
+const SCOOP_DIR = new THREE.Vector3(0.25, -0.55, 0.8).normalize(); // 器：上の手前から、奥へ
+/** 肘を向ける方向（胴の座標、右腕。左腕は x を反転）：外側・下 */
+const ELBOW_POLE = new THREE.Vector3(-0.6, -0.78, 0.05);
+const NEG_Y = new THREE.Vector3(0, -1, 0);
+const _v1 = new THREE.Vector3();
+const _v2 = new THREE.Vector3();
+const _v3 = new THREE.Vector3();
+const _q = new THREE.Quaternion();
+const _e = new THREE.Euler();
+const _m = new THREE.Matrix4();
 
 export class CustomerModel {
   readonly root = new THREE.Group();
@@ -60,6 +79,16 @@ export class CustomerModel {
   private materials: THREE.Material[] = [];
   private geometries: THREE.BufferGeometry[] = [];
   private breathe = Math.random() * 10;
+  private upperLen: number;
+  private foreLen: number;
+  /** 唇の少し前（頭の座標） */
+  private mouthLocal: THREE.Vector3;
+  private maskParts: THREE.Object3D[] = [];
+  /** スプーンで食べる動作（scoop = 器からすくう、bite = 口へ運ぶ） */
+  private eatMode: 'scoop' | 'bite' | null = null;
+  private eatFood = new THREE.Vector3();
+  /** 右手で器を持つ位置（ワールド座標。呼び出し側が毎フレーム動かす） */
+  private hold: THREE.Vector3 | null = null;
 
   constructor(look: Look, opts: { standing?: boolean } = {}) {
     this.look = look;
@@ -69,6 +98,10 @@ export class CustomerModel {
     const headR = child ? 0.108 : 0.112;
     this.headR = headR;
     this.hipY = opts.standing ? (child ? 0.62 : 0.84) : child ? 0.8 : 0.72;
+    this.upperLen = 0.22 * s;
+    this.foreLen = 0.21 * s;
+    // 顔のキャンバスで口を描く高さ（y = 172 / 256）を、顔の球面上の位置にしたもの
+    this.mouthLocal = new THREE.Vector3(0, -headR * 0.41, headR * 0.95);
     this.face = new FaceCanvas(look);
 
     const skin = this.mat(new THREE.MeshPhysicalMaterial({ color: look.skin, roughness: 0.55, sheen: 0.4, sheenColor: new THREE.Color('#ffd8c8'), clearcoat: 0.05 }));
@@ -141,23 +174,21 @@ export class CustomerModel {
       hand.position.y = -0.21 * s;
       hand.scale.set(1, 1.1, 0.8);
       elbow.add(hand);
-      return { shoulder, elbow, hand, cur: { ...POSES.rest.r, sz: side * 0.12 } };
+      return { side, shoulder, elbow, hand, q: new THREE.Quaternion(), ex: -0.75 };
     };
     this.arms = { r: mkArm(-1), l: mkArm(1) };
-    // 右手のスプーン
+    // 右手のスプーン（付け根が手の中心。-Y 方向へ柄が伸び、先に皿）。向きは食べるあいだ毎フレーム決める
     this.spoon = new THREE.Group();
     const spoonMat = this.mat(new THREE.MeshStandardMaterial({ color: '#c9d0d6', metalness: 1, roughness: 0.25 }));
-    const handle = new THREE.Mesh(this.geo(new THREE.CylinderGeometry(0.004, 0.005, 0.12, 8)), spoonMat);
+    const handle = new THREE.Mesh(this.geo(new THREE.CylinderGeometry(0.0035, 0.005, 0.11, 8)), spoonMat);
     handle.position.y = -0.06;
-    const bowl = new THREE.Mesh(this.geo(new THREE.SphereGeometry(0.016, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2)), spoonMat);
-    bowl.scale.set(1, 0.4, 1.4);
-    bowl.rotation.x = Math.PI;
-    bowl.position.y = -0.125;
+    const bowl = new THREE.Mesh(this.geo(new THREE.SphereGeometry(0.016, 14, 10)), spoonMat);
+    bowl.scale.set(0.9, 1.35, 0.4);
+    bowl.position.y = -SPOON_REACH;
     this.spoon.add(handle, bowl);
-    this.spoon.rotation.x = -1.2;
-    this.spoon.position.set(0, -0.02, 0.02);
+    this.spoon.position.copy(this.arms.r.hand.position);
     this.spoon.visible = false;
-    this.arms.r.hand.add(this.spoon);
+    this.arms.r.elbow.add(this.spoon);
 
     // 首と頭
     const neck = new THREE.Mesh(this.geo(new THREE.CylinderGeometry(0.043 * s, 0.05 * s, 0.1 * s, 16)), skin);
@@ -199,11 +230,13 @@ export class CustomerModel {
       );
       mask.scale.copy(skull.scale);
       this.head.add(mask);
+      this.maskParts.push(mask);
       for (const sd of [-1, 1]) {
         const strap = new THREE.Mesh(this.geo(new THREE.TorusGeometry(headR * 1.01, 0.004, 6, 32, Math.PI * 0.5)), this.mat(new THREE.MeshStandardMaterial({ color: '#1d231f' })));
         strap.rotation.set(0, sd > 0 ? 0.1 : Math.PI - 0.1, 0);
         strap.position.y = -headR * 0.15;
         this.head.add(strap);
+        this.maskParts.push(strap);
       }
     }
 
@@ -231,10 +264,9 @@ export class CustomerModel {
         this.body.add(shoe);
       }
       this.pose = 'hang';
-      for (const a of [this.arms.r, this.arms.l]) a.cur = { sx: 0.05, sz: a === this.arms.r ? 0.1 : -0.1, ex: -0.12 };
     }
     this.setMood('neutral');
-    this.applyArms(1);
+    this.applyArms(1, null, false);
   }
 
   private mat<T extends THREE.Material>(m: T): T {
@@ -362,10 +394,15 @@ export class CustomerModel {
         const band = mesh(new THREE.CylinderGeometry(r * 1.04, r * 1.04, r * 0.16, 32), this.mat(new THREE.MeshStandardMaterial({ color: '#0d0f12', roughness: 0.4 })));
         band.position.y = r * 0.55;
         band.rotation.x = -0.12;
-        const visor = mesh(new THREE.CylinderGeometry(r * 0.9, r * 0.9, 0.008, 24, 1, false, -Math.PI / 2, Math.PI), this.mat(new THREE.MeshPhysicalMaterial({ color: '#07080a', roughness: 0.15, clearcoat: 1 })));
+        // つばの光沢は控えめに（強いと、うつむいたときに照明の反射がカメラへ向いて白くにじむ）
+        const visor = mesh(
+          new THREE.CylinderGeometry(r * 0.9, r * 0.9, 0.008, 24, 1, false, -Math.PI / 2, Math.PI),
+          this.mat(new THREE.MeshPhysicalMaterial({ color: '#07080a', roughness: 0.42, clearcoat: 0.35, clearcoatRoughness: 0.4 })),
+        );
         visor.position.set(0, r * 0.45, r * 0.62);
         visor.rotation.x = 0.35;
-        const pin = mesh(new THREE.CylinderGeometry(r * 0.13, r * 0.13, 0.01, 6), this.mat(new THREE.MeshStandardMaterial({ color: '#d9b04a', metalness: 1, roughness: 0.3 })));
+        // 記章もつや消し気味に（なめらかな金属だと、顔を上げたときに照明を映して光の点になる）
+        const pin = mesh(new THREE.CylinderGeometry(r * 0.13, r * 0.13, 0.01, 6), this.mat(new THREE.MeshStandardMaterial({ color: '#c9a043', metalness: 0.85, roughness: 0.55 })));
         pin.rotation.x = Math.PI / 2 - 0.12;
         pin.position.set(0, r * 0.8, r * 1.14);
         break;
@@ -470,6 +507,92 @@ export class CustomerModel {
     this.spoon.visible = on;
   }
 
+  /** スプーンで食べる：scoop = 器の料理（food、ワールド座標）をすくう、bite = 口へ運ぶ、null = やめる */
+  setEating(mode: 'scoop' | 'bite' | null, food?: THREE.Vector3): void {
+    this.eatMode = mode;
+    if (food) this.eatFood.copy(food);
+  }
+
+  /** 右手で器を持つ：手を p（ワールド座標）に置く。p は呼び出し側が毎フレーム動かしてよい。null で放す */
+  holdAt(p: THREE.Vector3 | null): void {
+    this.hold = p;
+  }
+
+  /** 食べたり飲んだりするあいだは、マスクを外す */
+  setMouthFree(on: boolean): void {
+    for (const m of this.maskParts) m.visible = !on;
+  }
+
+  /** 唇の少し前のワールド座標 */
+  mouthWorld(out = new THREE.Vector3()): THREE.Vector3 {
+    this.head.updateWorldMatrix(true, false);
+    return this.head.localToWorld(out.copy(this.mouthLocal));
+  }
+
+  /** 右手の中心のワールド座標 */
+  handWorld(out = new THREE.Vector3()): THREE.Vector3 {
+    this.arms.r.hand.updateWorldMatrix(true, false);
+    return this.arms.r.hand.getWorldPosition(out);
+  }
+
+  /** 体の向き（ワールド）で表した d をワールドの向きにする */
+  private toWorldDir(d: THREE.Vector3, out: THREE.Vector3): THREE.Vector3 {
+    return out.copy(d).applyQuaternion(this.root.getWorldQuaternion(_q));
+  }
+
+  /** スプーンの先が目標（すくう料理、または唇）に届くときの、右手の位置（ワールド） */
+  private spoonHandTarget(out: THREE.Vector3): THREE.Vector3 {
+    const aim = this.eatMode === 'scoop' ? _v1.copy(this.eatFood) : this.mouthWorld(_v1);
+    this.toWorldDir(this.eatMode === 'scoop' ? SCOOP_DIR : BITE_DIR, _v2);
+    return out.copy(aim).addScaledVector(_v2, -SPOON_REACH);
+  }
+
+  /** スプーンの先を、すくう料理か唇へ向ける（腕を動かしたあとに呼ぶ） */
+  private aimSpoon(): void {
+    const aim = this.eatMode === 'scoop' ? _v1.copy(this.eatFood) : this.mouthWorld(_v1);
+    const elbow = this.arms.r.elbow;
+    elbow.updateWorldMatrix(true, false);
+    const pivot = this.spoon.getWorldPosition(_v2);
+    const dir = aim.sub(pivot);
+    if (dir.lengthSq() < 1e-8) return;
+    dir.normalize().applyQuaternion(elbow.getWorldQuaternion(_q).invert());
+    this.spoon.quaternion.setFromUnitVectors(NEG_Y, dir);
+  }
+
+  /**
+   * 2 本の骨の IK：手を target（ワールド座標）へ。肘は外側・下へ向ける。
+   * 届かないときは、腕を伸ばしきって target の方へ向ける
+   */
+  private solveArm(a: Arm, target: THREE.Vector3, outQ: THREE.Quaternion): number {
+    const L1 = this.upperLen;
+    const L2 = this.foreLen;
+    const S = a.shoulder.position;
+    const toT = this.torso.worldToLocal(_v1.copy(target)).sub(S);
+    const len = toT.length();
+    const u = len > 1e-6 ? toT.divideScalar(len) : toT.set(0, -1, 0);
+    const d = THREE.MathUtils.clamp(len, Math.abs(L1 - L2) + 1e-3, L1 + L2 - 1e-3);
+    // 肘の位置：target の方向 u と、肘を向けたい方向（u に直交する成分）v のあいだ
+    const cosA = THREE.MathUtils.clamp((L1 * L1 + d * d - L2 * L2) / (2 * L1 * d), -1, 1);
+    const sinA = Math.sqrt(Math.max(0, 1 - cosA * cosA));
+    const pole = _v2.copy(ELBOW_POLE);
+    pole.x *= -a.side;
+    const v = pole.addScaledVector(u, -pole.dot(u));
+    if (v.lengthSq() < 1e-8) v.set(0, -1, 0).addScaledVector(u, -u.y);
+    v.normalize();
+    const upper = _v3.copy(u).multiplyScalar(cosA).addScaledVector(v, sinA); // 肩 → 肘の向き
+    // 肩の座標軸：-Y が上腕の向き、+Z が肘の曲がる向き（前腕の、上腕に直交する成分）
+    const fore = u.multiplyScalar(d).addScaledVector(upper, -L1).normalize(); // 肘 → 手の向き
+    const bend = fore.addScaledVector(upper, -fore.dot(upper));
+    if (bend.lengthSq() < 1e-8) bend.copy(v);
+    bend.normalize();
+    const yAxis = upper.negate();
+    const xAxis = new THREE.Vector3().crossVectors(yAxis, bend);
+    outQ.setFromRotationMatrix(_m.makeBasis(xAxis, yAxis, bend));
+    // 肘の内角 γ から、前腕が上腕の延長から曲がる角度（負で +Z 側へ曲がる）
+    const cosG = THREE.MathUtils.clamp((L1 * L1 + L2 * L2 - d * d) / (2 * L1 * L2), -1, 1);
+    return -(Math.PI - Math.acos(cosG));
+  }
+
   showEmote(sym: string, color = '#ffffff', dur = 1.6): void {
     (this.emoteSprite.material as THREE.SpriteMaterial).map = emoteTexture(sym, color);
     (this.emoteSprite.material as THREE.SpriteMaterial).needsUpdate = true;
@@ -498,16 +621,26 @@ export class CustomerModel {
     return this.head.getWorldPosition(new THREE.Vector3());
   }
 
-  private applyArms(k: number): void {
+  /** 腕をポーズへ近づける。rTarget があれば右手はそこへ（IK）。stick なら目標にほぼ貼りつける */
+  private applyArms(k: number, rTarget: THREE.Vector3 | null, stick: boolean): void {
     const p = POSES[this.pose];
+    const goalQ = new THREE.Quaternion();
     for (const side of ['r', 'l'] as const) {
       const a = this.arms[side];
-      const goal = p[side];
-      a.cur.sx += (goal.sx - a.cur.sx) * k;
-      a.cur.sz += (goal.sz - a.cur.sz) * k;
-      a.cur.ex += (goal.ex - a.cur.ex) * k;
-      a.shoulder.rotation.set(a.cur.sx, 0, a.cur.sz);
-      a.elbow.rotation.set(a.cur.ex, 0, 0);
+      let goalEx: number;
+      let kk = k;
+      if (side === 'r' && rTarget) {
+        goalEx = this.solveArm(a, rTarget, goalQ);
+        if (stick) kk = Math.max(k, 0.55);
+      } else {
+        const g: ArmPose = p[side];
+        goalQ.setFromEuler(_e.set(g.sx, 0, g.sz));
+        goalEx = g.ex;
+      }
+      a.q.slerp(goalQ, kk);
+      a.ex += (goalEx - a.ex) * kk;
+      a.shoulder.quaternion.copy(a.q);
+      a.elbow.rotation.set(a.ex, 0, 0);
     }
   }
 
@@ -562,7 +695,14 @@ export class CustomerModel {
     this.body.position.y = this.hipY + jumpY + walkY;
     this.body.rotation.x = this.lean + (this.look.body === 'elder' ? 0.04 : 0);
     this.body.rotation.z = Math.sin(this.bob) * 0.04 * this.walk;
-    this.applyArms(damp(7, dt));
+    // 腕：器を持つ・スプーンで食べるときは右手を目標へ（体と頭を動かしたあとの位置で解く）
+    let rTarget: THREE.Vector3 | null = null;
+    if (this.hold || this.eatMode) {
+      this.head.updateWorldMatrix(true, false);
+      rTarget = this.hold ?? this.spoonHandTarget(new THREE.Vector3());
+    }
+    this.applyArms(damp(this.eatMode ? 9 : 7, dt), rTarget, !!this.hold);
+    if (this.spoon.visible && this.eatMode) this.aimSpoon();
 
     // 感情マーク
     if (this.emoteLife > 0) {

@@ -160,6 +160,24 @@ export class Dispenser {
     this.pistonGoal = 0;
   }
 
+  /** 営業を打ち切るとき：落ちている素材と糸を消し、ピストンを戻して上へ（落下を待つ流れは進まなくなる） */
+  reset(): void {
+    for (const d of this.drops) {
+      d.mesh.parent?.remove(d.mesh);
+      d.mesh.geometry.dispose();
+      (d.mesh.material as THREE.Material).dispose();
+    }
+    this.drops = [];
+    for (const s of this.streams) {
+      s.mesh.parent?.remove(s.mesh);
+      s.mesh.geometry.dispose();
+      (s.mesh.material as THREE.Material).dispose();
+    }
+    this.streams = [];
+    this.pistonGoal = 0;
+    this.ascend();
+  }
+
   /** トッピングの糸を垂らす */
   drizzle(id: IngId): void {
     const nz = this.nozzles.get(id)!;

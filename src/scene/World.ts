@@ -55,6 +55,8 @@ export class World {
   readonly sparks = new Particles(500, true);
   food: Food | null = null;
   vessel: VesselInfo | null = null;
+  /** 客の前へ出した器（食べ終わるまで） */
+  private servedVessel: VesselInfo | null = null;
   customer: CustomerModel | null = null;
   private raycaster = new THREE.Raycaster();
   private busyCount = 0;
@@ -405,6 +407,7 @@ export class World {
         },
         ease.inOutCubic,
       );
+      this.servedVessel = v;
       this.vessel = null;
       this.servedHeatDecay = 1;
     });
@@ -441,6 +444,41 @@ export class World {
     });
   }
 
+  /**
+   * 営業を打ち切ってタイトルへ戻るとき：進行中の演出をその場で止め（それを待っていた流れは、もう進まない）、
+   * 厨房と客席を空にする
+   */
+  reset(): void {
+    this.anim.clear();
+    this.busyCount = 0;
+    this.dispenseQueue = Promise.resolve();
+    this.dispenser.reset();
+    this.customer?.dispose();
+    this.customer = null;
+    this.arm.release(this.stage.scene);
+    this.arm.headingGoal = null;
+    this.arm.rollGoal = 0;
+    this.food?.dispose();
+    this.food = null;
+    const tray = this.kitchen.tray;
+    const groups = [this.vessel?.group, this.servedVessel?.group, ...tray.children.filter((c) => c.type === 'Group')];
+    for (const g of groups) {
+      if (!g?.parent) continue;
+      g.parent.remove(g);
+      g.traverse((o) => (o as THREE.Mesh).geometry?.dispose());
+    }
+    this.vessel = null;
+    this.servedVessel = null;
+    tray.position.copy(TRAY_KITCHEN);
+    this.goo.clear();
+    this.kitchen.irisOpen = 0;
+    this.kitchen.setFieldActive(false);
+    this.kitchen.elevator.position.y = COUNTER_Y - 0.25;
+    this.setTemp(0, 0);
+    this.servedHeatDecay = 0;
+    this.setArmRest();
+  }
+
   /** 次の客のために台をきれいにする（すでに配膳済みなら何もしない） */
   resetStation(): void {
     this.goo.clear();
@@ -464,6 +502,7 @@ export class World {
       }
       this.food?.dispose();
       this.food = null;
+      this.servedVessel = null;
       await this.anim.tween(0.8, (k) => trayAt(1 - k, tray.position), ease.inOutCubic);
     });
   }
@@ -474,9 +513,10 @@ export class World {
     this.customer?.dispose();
     const c = new CustomerModel(look);
     this.customer = c;
-    // 行列（右奥）から歩いてきて、配膳口の前で正面を向く
+    // 行列（右奥）から歩いてきて、配膳口の前で正面を向く。子どもは腕が短いので、少し前に座る
+    const seat = look.body === 'child' ? SEAT.clone().setZ(SEAT.z + 0.08) : SEAT;
     const from = new THREE.Vector3(1.35, 0, SEAT.z - 0.35);
-    const walkYaw = Math.atan2(SEAT.x - from.x, SEAT.z - from.z);
+    const walkYaw = Math.atan2(seat.x - from.x, seat.z - from.z);
     c.root.position.copy(from);
     c.root.rotation.y = walkYaw;
     c.lookAt.copy(this.stage.camera.position);
@@ -485,31 +525,177 @@ export class World {
     this.kitchen.setShutter(true);
     c.setWalk(1);
     c.setPose('hang');
-    await this.anim.tween(1.7, (k) => c.root.position.lerpVectors(from, SEAT, k), ease.inOutQuad);
+    await this.anim.tween(1.7, (k) => c.root.position.lerpVectors(from, seat, k), ease.inOutQuad);
     c.setWalk(0);
     await this.anim.tween(0.4, (k) => (c.root.rotation.y = lerp(walkYaw, 0, k)), ease.outQuad);
     c.setPose('rest');
     return c;
   }
 
+  /** 客が食べる（飲み物はカップ・グラス・茶碗ごと持ち上げて飲み、ほかはスプーンで口へ運ぶ） */
   async customerEat(onBite: (k: number) => void): Promise<void> {
     const c = this.customer;
     if (!c) return;
+    const v = this.servedVessel;
+    c.setMouthFree(true);
+    if (v && this.food?.isLiquid && (v.id === 'cup' || v.id === 'glass' || v.id === 'chawan')) await this.customerDrink(c, v, onBite);
+    else await this.customerSpoon(c, onBite);
+    c.setMouthFree(false);
+    c.lookAt.copy(this.stage.camera.position);
+  }
+
+  /** スプーンで 3 口：器の料理をすくい、口へ運んで噛む */
+  private async customerSpoon(c: CustomerModel, onBite: (k: number) => void): Promise<void> {
+    // 子どもは腕が短いので、少し深く前かがみになって届かせる
+    const kid = c.look.body === 'child';
     c.setSpoon(true);
     c.lookAt.set(0, 1.0, TRAY_CUSTOMER.z);
+    const scoop = new THREE.Vector3();
     for (let i = 0; i < 3; i++) {
-      c.setPose('eat');
-      await this.wait(0.45);
+      // すくう：料理の上面の、客に近い側へ少し沈める
+      if (this.food) scoop.copy(this.food.topWorld()).add(new THREE.Vector3(0, -0.008, -0.02));
+      else this.servedVessel?.group.getWorldPosition(scoop).add(new THREE.Vector3(0, 0.02, 0));
+      c.setLean(kid ? 0.4 : 0.3);
+      c.setEating('scoop', scoop);
+      await this.wait(0.5);
+      // 口へ
+      c.setLean(0.04);
+      c.setEating('bite');
+      await this.wait(0.42);
       c.setMood('chew');
       onBite((i + 1) / 3);
       this.food?.setEaten((i + 1) / 3.4);
-      await this.wait(0.7);
-      c.setPose('rest');
+      await this.wait(0.55);
       c.setMood('neutral');
-      await this.wait(0.3);
     }
+    c.setEating(null);
+    c.setLean(0);
+    await this.wait(0.3);
     c.setSpoon(false);
-    c.lookAt.copy(this.stage.camera.position);
+  }
+
+  /**
+   * 飲み物：右手で器を取り、手前へ引き寄せ、口元で傾けて 3 口飲み、トレイに戻す。
+   * 器の動きを決めて、手（IK）がそれに付いていく
+   */
+  private async customerDrink(c: CustomerModel, v: VesselInfo, onBite: (k: number) => void): Promise<void> {
+    const vg = v.group;
+    const tray = vg.parent;
+    if (!tray) return;
+    // 子どもは腕が短いので、少し深く前かがみになり、器を大きめに引き寄せる
+    const kid = c.look.body === 'child';
+    const reachLean = kid ? 0.5 : 0.45;
+    const pullLean = kid ? 0.32 : 0.22;
+    this.stage.scene.attach(vg); // 世界座標のまま持ち上げる
+    const s = vg.getWorldScale(new THREE.Vector3()).x;
+    const H = v.rimY * s;
+    const R = v.inner[v.inner.length - 1].x * s;
+    const yaw = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), new THREE.Euler().setFromQuaternion(vg.quaternion, 'YXZ').y);
+    const base0 = vg.position.clone();
+    const base1 = base0.clone().add(new THREE.Vector3(0, 0, kid ? -0.12 : -0.1)); // 手前へ引き寄せた位置
+    const base = base0.clone();
+    let tilt = 0;
+    // 器の姿勢：客の方へ tilt だけ傾ける
+    const X = new THREE.Vector3(1, 0, 0);
+    const tiltQ = new THREE.Quaternion();
+    const place = () => {
+      tiltQ.setFromAxisAngle(X, -tilt);
+      vg.position.copy(base);
+      vg.quaternion.copy(tiltQ).multiply(yaw);
+    };
+    // 手：器の右側（本人から見て）、高さの 45%。器と一緒に傾く（カップなら取っ手のあたり）
+    const grip = new THREE.Vector3();
+    const gripAt = () => grip.set(-(R + 0.042), H * 0.45, 0).applyQuaternion(tiltQ).add(base);
+    // 口元の位置：傾けた器の、客に近い側の縁が唇の少し前に来るように
+    const lips = new THREE.Vector3();
+    const sipBase = (out: THREE.Vector3) => {
+      c.mouthWorld(lips).add(new THREE.Vector3(0, -0.006, 0.008));
+      tiltQ.setFromAxisAngle(X, -tilt);
+      return out.copy(lips).sub(new THREE.Vector3(0, H, -R).applyQuaternion(tiltQ));
+    };
+    place();
+    gripAt();
+    const hand = c.handWorld(new THREE.Vector3());
+    const handTarget = hand.clone();
+    c.holdAt(handTarget);
+    c.lookAt.copy(base0);
+    // 手を伸ばして持つ
+    c.setLean(reachLean);
+    await this.anim.tween(0.55, (k) => handTarget.lerpVectors(hand, gripAt(), k), ease.inOutQuad);
+    // 手前へ引き寄せる
+    c.setLean(pullLean);
+    await this.anim.tween(
+      0.35,
+      (k) => {
+        base.lerpVectors(base0, base1, k);
+        place();
+        handTarget.copy(gripAt());
+      },
+      ease.inOutQuad,
+    );
+    // 口元へ持ち上げ、傾ける
+    c.setLean(0.03);
+    c.lookAt.set(0, 1.62, 0.5);
+    const sipTilt = v.id === 'chawan' ? 0.42 : 0.55;
+    const from = base.clone();
+    const to = new THREE.Vector3();
+    await this.anim.tween(
+      0.6,
+      (k) => {
+        tilt = sipTilt * k;
+        base.lerpVectors(from, sipBase(to), k);
+        place();
+        handTarget.copy(gripAt());
+      },
+      ease.inOutCubic,
+    );
+    // 3 口。飲むほど傾ける
+    for (let i = 0; i < 3; i++) {
+      const t0 = tilt;
+      const t1 = sipTilt + 0.14 * (i + 1);
+      c.setMood('chew');
+      await this.anim.tween(
+        0.28,
+        (k) => {
+          tilt = t0 + (t1 - t0) * k;
+          sipBase(base);
+          place();
+          handTarget.copy(gripAt());
+        },
+        ease.inOutQuad,
+      );
+      onBite((i + 1) / 3);
+      this.food?.setEaten((i + 1) / 3.4);
+      await this.anim.tween(
+        0.32,
+        () => {
+          sipBase(base);
+          place();
+          handTarget.copy(gripAt());
+        },
+        ease.linear,
+      );
+      c.setMood('neutral');
+    }
+    // トレイに戻す
+    c.lookAt.copy(base1);
+    c.setLean(pullLean);
+    const up = base.clone();
+    const t0 = tilt;
+    await this.anim.tween(
+      0.55,
+      (k) => {
+        tilt = t0 * (1 - k);
+        base.lerpVectors(up, base1, k);
+        place();
+        handTarget.copy(gripAt());
+      },
+      ease.inOutCubic,
+    );
+    tray.attach(vg);
+    c.holdAt(null);
+    c.setLean(0);
+    await this.wait(0.3);
   }
 
   react(mood: Mood): void {

@@ -59,6 +59,9 @@ const BEST_KEY = 'dystopia-meshi-best-v1';
 const HEAT_RATE = 0.55;
 const START_SAT = 50;
 
+/** 営業が打ち切られた（タイトルへ戻った）ことを、進行中の流れに伝える */
+class RunAborted extends Error {}
+
 function load<T>(key: string): T | null {
   try {
     const s = localStorage.getItem(key);
@@ -110,6 +113,8 @@ export class Game {
   private keyHeat: -1 | 0 | 1 = 0;
   private burntWarned = false;
   private acting = false;
+  /** 営業の番号。タイトルへ戻るたびに変わり、古い営業の流れはそこで止まる */
+  private runId = 0;
   private served: ((kind: 'serve' | 'timeout') => void) | null = null;
   private talking = false;
   private waitLineT = 25;
@@ -159,7 +164,33 @@ export class Game {
     this.showTitle();
   }
 
+  /**
+   * 営業を打ち切る（タイトルへ戻るとき）。厨房と客席の演出をその場で止めて片付け、
+   * 進行中の客の流れは、次に待ちが明けたところで止まる（RunAborted）
+   */
+  private abortRun(): void {
+    this.runId++;
+    this.served = null;
+    this.acting = false;
+    this.talking = false;
+    this.heatDir = 0;
+    this.keyHeat = 0;
+    this.audio.setHeatSound(0, 0);
+    this.ui.skipTyping();
+    this.order = null;
+    this.world.reset();
+    for (const s of ['rating', 'notice', 'report']) this.screens.close(s);
+  }
+
+  /** 営業の流れの中で待つ。待っているあいだに営業が打ち切られていたら、流れをそこで止める */
+  private async guard<T>(run: number, p: Promise<T>): Promise<T> {
+    const v = await p;
+    if (run !== this.runId) throw new RunAborted();
+    return v;
+  }
+
   private showTitle(): void {
+    this.abortRun();
     this.phase = 'title';
     this.paused = false;
     this.ui.hideGameplay();
@@ -339,19 +370,25 @@ export class Game {
   }
 
   private async runDay(): Promise<void> {
-    this.audio.setMood(this.satisfaction < 25 ? 'tense' : 'work');
-    for (let i = 0; i < this.dayDef.customers; i++) {
-      this.customerIdx = i;
-      this.ui.setDay(this.day, this.dayDef.title, i + 1, this.dayDef.customers, this.endless);
-      const alive = await this.runCustomer(i);
-      if (!alive) return;
+    const run = this.runId;
+    try {
+      this.audio.setMood(this.satisfaction < 25 ? 'tense' : 'work');
+      for (let i = 0; i < this.dayDef.customers; i++) {
+        this.customerIdx = i;
+        this.ui.setDay(this.day, this.dayDef.title, i + 1, this.dayDef.customers, this.endless);
+        const alive = await this.guard(run, this.runCustomer(i, run));
+        if (!alive) return;
+      }
+      this.dayReport();
+    } catch (e) {
+      // タイトルへ戻って打ち切られた営業は、ここで静かに終える
+      if (!(e instanceof RunAborted)) throw e;
     }
-    this.dayReport();
   }
 
   // ───────────── 1 人の客 ─────────────
 
-  private async runCustomer(i: number): Promise<boolean> {
+  private async runCustomer(i: number, run: number): Promise<boolean> {
     const order = makeOrder({ rng: this.rng, day: this.dayDef, index: i, flags: this.flags, usedToday: this.usedToday, relaxed: this.settings.relaxed, endless: this.endless });
     this.order = order;
     this.usedToday.push(order.spec.target.id);
@@ -377,7 +414,7 @@ export class Game {
     this.phase = 'arrive';
     this.audio.shutter(true);
     this.world.shot('order', 1.6);
-    await this.world.customerArrive(order.citizen.look);
+    await this.guard(run, this.world.customerArrive(order.citizen.look));
     this.world.setArmAttend();
     void this.world.bow();
     this.audio.servo();
@@ -386,8 +423,8 @@ export class Game {
     // 注文
     this.phase = 'order';
     for (const line of order.lines) {
-      await this.speak(line);
-      await this.world.wait(0.25);
+      await this.guard(run, this.speak(line));
+      await this.guard(run, this.world.wait(0.25));
     }
     this.autoMemo(order.lines);
     this.world.shot('cook', 1.4);
@@ -397,10 +434,10 @@ export class Game {
     this.tutorial('ordered');
 
     // 提供されるか、市民が帰るまで待つ
-    const kind = await new Promise<'serve' | 'timeout'>((resolve) => (this.served = resolve));
+    const kind = await this.guard(run, new Promise<'serve' | 'timeout'>((resolve) => (this.served = resolve)));
     this.served = null;
-    if (kind === 'timeout') return this.handleTimeout();
-    return this.finishServe();
+    if (kind === 'timeout') return this.handleTimeout(run);
+    return this.finishServe(run);
   }
 
   private async speak(text: string): Promise<void> {
@@ -428,6 +465,7 @@ export class Game {
   private async ask(q: QuestionId): Promise<void> {
     const o = this.order;
     if (!o || this.phase !== 'cook' || this.talking || o.questionsLeft <= 0 || o.asked.includes(q)) return;
+    const run = this.runId;
     const def = QUESTION_DEFS.find((d) => d.id === q)!;
     o.questionsLeft--;
     o.asked.push(q);
@@ -438,8 +476,10 @@ export class Game {
     await this.ui.say('ai', def.ask);
     this.world.shot('order', 2);
     await this.world.wait(0.3);
+    if (run !== this.runId) return;
     this.world.customer?.setMood(q === 'memory' ? 'think' : 'neutral');
     await this.speak(o.answers[q]);
+    if (run !== this.runId) return;
     this.autoMemo([o.answers[q]]);
     this.world.customer?.setMood('neutral');
     this.talking = false;
@@ -678,7 +718,7 @@ export class Game {
     });
   }
 
-  private async finishServe(): Promise<boolean> {
+  private async finishServe(run: number): Promise<boolean> {
     const order = this.order!;
     this.phase = 'serving';
     this.ui.clearTip();
@@ -689,19 +729,19 @@ export class Game {
     this.world.shot('cook', 1.4);
     this.audio.servo();
     const patienceRatio = order.patience / order.patienceMax;
-    await this.world.serve();
+    await this.guard(run, this.world.serve());
     this.audio.slide();
-    await this.world.wait(0.15);
+    await this.guard(run, this.world.wait(0.15));
     this.audio.bell();
     this.phase = 'eating';
     this.world.shot('eat', 1.5);
-    await this.world.wait(0.4);
-    await this.world.customerEat(() => this.audio.chew());
+    await this.guard(run, this.world.wait(0.4));
+    await this.guard(run, this.world.customerEat(() => this.audio.chew()));
     const ev = evaluate(this.build, order.spec, this.settings.relaxed ? 1 : patienceRatio);
-    return this.conclude(ev);
+    return this.conclude(ev, run);
   }
 
-  private async handleTimeout(): Promise<boolean> {
+  private async handleTimeout(run: number): Promise<boolean> {
     const order = this.order!;
     this.phase = 'leaving';
     this.ui.clearTip();
@@ -711,12 +751,12 @@ export class Game {
     this.heatDir = 0;
     this.audio.setHeatSound(0, 0);
     this.audio.bad();
-    if (this.world.food || this.world.goo.count) await this.world.discard();
-    return this.conclude(timeoutEvaluation(order.spec));
+    if (this.world.food || this.world.goo.count) await this.guard(run, this.world.discard());
+    return this.conclude(timeoutEvaluation(order.spec), run);
   }
 
   /** 評価・反応・満足度・退店 */
-  private async conclude(ev: Evaluation): Promise<boolean> {
+  private async conclude(ev: Evaluation, run: number): Promise<boolean> {
     const order = this.order!;
     const reaction = composeReaction(ev, order, this.rng);
     this.world.react(reaction.mood as Mood);
@@ -726,8 +766,8 @@ export class Game {
     if (ev.stars >= 4) void this.world.armNod();
     this.phase = 'rating';
     for (const line of reaction.lines) {
-      await this.speak(line);
-      await this.world.wait(0.2);
+      await this.guard(run, this.speak(line));
+      await this.guard(run, this.world.wait(0.2));
     }
     // 満足度
     const delta = satisfactionDelta(ev.stars, order.spec.weight);
@@ -759,7 +799,7 @@ export class Game {
     this.flags.usedRecipes.push(order.spec.target.id);
 
     // 評価カード
-    await new Promise<void>((resolve) => this.screens.showRating(this.ratingView(ev, delta), resolve, (i) => this.audio.star(i)));
+    await this.guard(run, new Promise<void>((resolve) => this.screens.showRating(this.ratingView(ev, delta), resolve, (i) => this.audio.star(i))));
     this.world.armMood('#35e0ff');
 
     // 退店
@@ -770,14 +810,14 @@ export class Game {
     this.ui.showOrderCard(false);
     this.world.shot('cook', 1.2);
     const leaving = this.world.customerLeave();
-    await this.world.wait(0.6);
-    if (!ev.timeout) await this.world.clearTray();
-    await leaving;
+    await this.guard(run, this.world.wait(0.6));
+    if (!ev.timeout) await this.guard(run, this.world.clearTray());
+    await this.guard(run, leaving);
     this.world.setArmRest();
     this.audio.shutter(false);
     this.world.closeShutter();
     this.world.resetStation();
-    await this.world.wait(0.9);
+    await this.guard(run, this.world.wait(0.9));
     this.order = null;
     this.tutorial('done');
 
@@ -1084,8 +1124,9 @@ export class Game {
     });
   }
 
+  /** 市民の相手をしている最中か（一時停止できるのはこのあいだだけ） */
   private isPlaying(): boolean {
-    return ['order', 'cook', 'arrive', 'serving', 'eating'].includes(this.phase);
+    return ['order', 'cook', 'arrive', 'serving', 'eating'].includes(this.phase) && !this.screens.isOpen('title');
   }
 
   private hoverTank(x: number, y: number): void {
@@ -1123,12 +1164,7 @@ export class Game {
         onSettings: () => this.openSettings(),
         onHelp: () => this.screens.showHelp(() => {}),
         onTitle: () => {
-          this.paused = false;
           this.screens.close('pause');
-          if (this.served) this.served = null;
-          this.world.customer?.dispose();
-          this.world.customer = null;
-          void this.world.discard();
           this.showTitle();
         },
       });
