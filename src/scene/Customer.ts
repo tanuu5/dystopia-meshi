@@ -45,6 +45,49 @@ const _q = new THREE.Quaternion();
 const _e = new THREE.Euler();
 const _m = new THREE.Matrix4();
 
+/**
+ * キャップのつば（厚みのある板）。帽子のふちの円（半径 ri、高さ 0）の前側 ±half に沿って付き、
+ * 正面で depth だけ張り出して両端へ細くなる。外へ行くほど droop の傾きで下がる。
+ */
+function capBill(ri: number, depth: number, half: number, droop: number, th: number): THREE.BufferGeometry {
+  const N = 24;
+  const M = 6;
+  const pos: number[] = [];
+  const idx: number[] = [];
+  const pt = (i: number, t: number, dy: number) => {
+    const a = -half + (2 * half * i) / N;
+    const e = depth * Math.sqrt(Math.max(Math.cos((a / half) * (Math.PI / 2)), 0)) * t;
+    pos.push(Math.sin(a) * (ri + e), dy - e * Math.tan(droop), Math.cos(a) * (ri + e));
+  };
+  // 上面と下面（法線が混ざらないよう、面ごとに頂点を分ける）
+  for (const [dy, flip] of [[0, false], [-th, true]] as const) {
+    const base = pos.length / 3;
+    for (let i = 0; i <= N; i++) for (let j = 0; j <= M; j++) pt(i, j / M, dy);
+    for (let i = 0; i < N; i++)
+      for (let j = 0; j < M; j++) {
+        const a = base + i * (M + 1) + j;
+        const b = a + M + 1;
+        if (flip) idx.push(a, b, a + 1, b, b + 1, a + 1);
+        else idx.push(a, a + 1, b, b, a + 1, b + 1);
+      }
+  }
+  // 外周のふち
+  const base = pos.length / 3;
+  for (let i = 0; i <= N; i++) {
+    pt(i, 1, 0);
+    pt(i, 1, -th);
+  }
+  for (let i = 0; i < N; i++) {
+    const a = base + i * 2;
+    idx.push(a, a + 1, a + 2, a + 2, a + 1, a + 3);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  return g;
+}
+
 export class CustomerModel {
   readonly root = new THREE.Group();
   readonly look: Look;
@@ -289,10 +332,15 @@ export class CustomerModel {
       this.head.add(mesh);
       return mesh;
     };
-    const cap = (rad: number, thetaLen: number, tilt: number) => add(new THREE.SphereGeometry(r * rad, 36, 18, 0, Math.PI * 2, 0, thetaLen), [0, 0, 0], [-tilt, 0, 0], [1, 1.04, 0.98]);
-    const backShell = (rad: number, t0: number, t1: number, open = 1.9) =>
-      add(new THREE.SphereGeometry(r * rad, 36, 18, Math.PI / 2 + open / 2, Math.PI * 2 - open, t0, t1 - t0), [0, 0, 0], [0, 0, 0], [1, 1.04, 0.98]);
-    const bangs = (w = 1.7) => add(new THREE.SphereGeometry(r * 1.075, 24, 8, Math.PI / 2 - w / 2, w, 0.3, 0.62), [0, 0, 0], [0, 0, 0], [1, 1.04, 0.98]);
+    // キャップ・ニット帽・三角巾は頭頂を覆う。その下の髪（頭頂・前髪・お団子・はね毛）は帽子とほぼ同じ大きさで突き抜けるので作らない
+    const covered = L.hat === 'cap' || L.hat === 'beanie' || L.hat === 'kerchief';
+    const cap = (rad: number, thetaLen: number, tilt: number) => covered ? null : add(new THREE.SphereGeometry(r * rad, 36, 18, 0, Math.PI * 2, 0, thetaLen), [0, 0, 0], [-tilt, 0, 0], [1, 1.04, 0.98]);
+    const backShell = (rad: number, t0: number, t1: number, open = 1.9) => {
+      // 帽子の下では、帽子のふちに隠れるあたりから下だけ（頭頂まであると帽子を突き抜ける）
+      if (covered) t0 = Math.max(t0, 1.15);
+      return add(new THREE.SphereGeometry(r * rad, 36, 18, Math.PI / 2 + open / 2, Math.PI * 2 - open, t0, t1 - t0), [0, 0, 0], [0, 0, 0], [1, 1.04, 0.98]);
+    };
+    const bangs = (w = 1.7) => covered ? null : add(new THREE.SphereGeometry(r * 1.075, 24, 8, Math.PI / 2 - w / 2, w, 0.3, 0.62), [0, 0, 0], [0, 0, 0], [1, 1.04, 0.98]);
     if (L.hat === 'peaked' || L.hat === 'hood') {
       // 帽子で隠れるので最低限
       backShell(1.05, 0.9, 1.75, 2.2);
@@ -330,7 +378,7 @@ export class CustomerModel {
       case 'bun':
         cap(1.06, 1.4, 0.45);
         backShell(1.055, 0.6, 1.75, 2.2);
-        add(new THREE.SphereGeometry(r * 0.42, 20, 14), [0, r * 0.72, -r * 0.62]);
+        if (!covered) add(new THREE.SphereGeometry(r * 0.42, 20, 14), [0, r * 0.72, -r * 0.62]);
         bangs(1.2);
         break;
       case 'bald':
@@ -344,7 +392,7 @@ export class CustomerModel {
         cap(1.07, 1.4, 0.5);
         backShell(1.065, 0.6, 1.75, 2.2);
         bangs(1.6);
-        for (let i = 0; i < 9; i++) {
+        for (let i = 0; i < (covered ? 0 : 9); i++) {
           const a = (i / 9) * Math.PI * 2;
           const cone = add(new THREE.ConeGeometry(r * 0.16, r * 0.45, 8), [Math.cos(a) * r * 0.55, r * 0.92, Math.sin(a) * r * 0.55 - r * 0.1]);
           cone.lookAt(new THREE.Vector3(Math.cos(a) * r * 3, r * 3.2, Math.sin(a) * r * 3));
@@ -360,7 +408,7 @@ export class CustomerModel {
       case 'side':
         cap(1.065, 1.35, 0.45);
         backShell(1.06, 0.6, 1.8, 2.2);
-        add(new THREE.SphereGeometry(r * 1.08, 24, 8, Math.PI / 2 - 0.2, 1.1, 0.25, 0.7), [0, 0, 0], [0, 0, 0.12], [1, 1.04, 0.98]);
+        if (!covered) add(new THREE.SphereGeometry(r * 1.08, 24, 8, Math.PI / 2 - 0.2, 1.1, 0.25, 0.7), [0, 0, 0], [0, 0, 0.12], [1, 1.04, 0.98]);
         break;
     }
   }
@@ -379,12 +427,13 @@ export class CustomerModel {
     };
     switch (L.hat) {
       case 'cap': {
-        const crown = mesh(new THREE.SphereGeometry(r * 1.1, 32, 14, 0, Math.PI * 2, 0, 1.3));
+        const R = r * 1.1;
+        const open = 1.3;
+        const crown = mesh(new THREE.SphereGeometry(R, 32, 14, 0, Math.PI * 2, 0, open));
         crown.rotation.x = -0.25;
-        const brim = mesh(new THREE.CylinderGeometry(r * 0.95, r * 0.95, 0.008, 24, 1, false, -Math.PI / 2, Math.PI));
-        brim.position.set(0, r * 0.32, r * 0.55);
-        brim.rotation.x = 0.28;
-        brim.scale.z = 1.1;
+        // つばは本体のふちの円に付け根を合わせる（離すと、あいだにおでこが帯になって見える）
+        const bill = mesh(capBill(R * Math.sin(open) * 0.99, r * 0.66, 0.98, 0.3, r * 0.06).translate(0, R * Math.cos(open) + r * 0.01, 0));
+        bill.rotation.x = crown.rotation.x;
         break;
       }
       case 'peaked': {
